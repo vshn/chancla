@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	chanclavshniov1alpha1 "github.com/vshn/chancla/api/v1alpha1"
+	"github.com/vshn/chancla/internal/alertmanager"
 	"github.com/vshn/chancla/internal/controller"
 )
 
@@ -110,14 +111,28 @@ func Start(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
+	// Create the Alertmanager client to inject it into the controller.
+	restConfig := mgr.GetConfig()
+	amConfig := &alertmanager.AlertmanagerConfig{
+		Host:        viper.GetString("alertmanager-host"),
+		Token:       restConfig.BearerToken,
+		UseTLS:      viper.GetBool("alertmanager-use-tls"),
+		InsecureTLS: viper.GetBool("alertmanager-insecure-tls"),
+	}
+	amClient, err := alertmanager.GetClient(amConfig)
+	if err != nil {
+		l.Error(err, "failed to create alertmanager client")
+		os.Exit(1)
+	}
+
 	// metrics.Registry.MustRegister(&controllers.UpgradeInformationCollector{
 	// 	Client: mgr.GetClient(),
 	// 	ManagedUpstreamClusterVersionName: managedUpstreamClusterVersionName,
 	// })
 	if err = (&controller.RunbookReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		// Config: mgr.GetConfig(),
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		Alertmanager: amClient,
 	}).SetupWithManager(mgr); err != nil {
 		l.Error(err, "unable to create controller", "controller", "PrometheusRule")
 		os.Exit(1)
