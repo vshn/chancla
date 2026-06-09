@@ -1,11 +1,33 @@
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  labels:
-    app.kubernetes.io/name: chancla
-    app.kubernetes.io/managed-by: kustomize
   name: manager-role
+  namespace: chancla-system
 rules:
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - chancla.vshn.io
+  resources:
+  - runbooks
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - chancla.vshn.io
+  resources:
+  - runbooks/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - chancla.vshn.io
+  resources:
+  - runbooks/status
+  verbs:
+  - get
+  - patch
+  - update

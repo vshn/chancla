@@ -9,4 +9,13 @@ layout:
 namespaced: true
 projectName: chancla
 repo: github.com/vshn/chancla
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: chancla.vshn.io
+  kind: Runbook
+  path: github.com/vshn/chancla/api/v1alpha1
+  version: v1alpha1
 version: "3"
