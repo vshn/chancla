@@ -39,10 +39,6 @@ type RunbookStatusFiringAlert struct {
 	// +optional
 	UpdatedAt string `json:"updatedAt,omitempty"`
 
-	// endsAt defines the time the alert ended.
-	// +optional
-	EndsAt string `json:"endsAt,omitempty"`
-
 	// annotations represents the annotations from the alert.
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`

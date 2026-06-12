@@ -1,11 +1,12 @@
 package alertmanager
 
 import (
+	"slices"
+
 	"github.com/bombsimon/logrusr/v4"
 	openapiclient "github.com/go-openapi/runtime/client"
 	alertmanagerclient "github.com/prometheus/alertmanager/api/v2/client"
 	"github.com/prometheus/alertmanager/api/v2/client/alert"
-	alertmanagermodels "github.com/prometheus/alertmanager/api/v2/models"
 	"github.com/sirupsen/logrus"
 
 	chanclavshniov1alpha1 "github.com/vshn/chancla/api/v1alpha1"
@@ -14,8 +15,6 @@ import (
 type AlertmanagerClient struct {
 	*alertmanagerclient.AlertmanagerAPI
 }
-
-type Alerts []*alertmanagermodels.GettableAlert
 
 type AlertmanagerConfig struct {
 	Host        string
@@ -80,11 +79,23 @@ func (c *AlertmanagerClient) AlertsFromMatchers(matchers []string) ([]*chanclavs
 			Fingerprint: *a.Fingerprint,
 			StartsAt:    a.StartsAt.String(),
 			UpdatedAt:   a.UpdatedAt.String(),
-			EndsAt:      a.EndsAt.String(),
 			Annotations: a.Annotations,
 			Labels:      a.Labels,
 		})
 	}
+	slices.SortStableFunc(alerts, alertSortFunc)
 
 	return alerts, nil
+}
+
+// Alertmanager computes the fingerprint from the label set of the alert,
+// specifically the combination of all label key-value pairs.
+// Nothing else (annotations, startsAt, endsAt, generatorURL) is included.
+func alertSortFunc(a, b *chanclavshniov1alpha1.RunbookStatusFiringAlert) int {
+	if a.Fingerprint < b.Fingerprint {
+		return -1
+	} else if b.Fingerprint < a.Fingerprint {
+		return 1
+	}
+	return 0
 }

@@ -38,6 +38,11 @@ const (
 const (
 	scheduledTimeAnnotation = "chancla.vshn.io/scheduled-at"
 	managedJobLabel         = "chancla.vshn.io/managed-by"
+
+	failedJobsHistoryLimit     = 3
+	successfulJobsHistoryLimit = 10
+
+	defaultRequeueAfter = 30 * time.Second
 )
 
 // RunbookReconciler reconciles a Runbook object
@@ -47,6 +52,10 @@ type RunbookReconciler struct {
 	Alertmanager *alertmanager.AlertmanagerClient
 }
 
+var (
+	aHundredYearsAgo = time.Now().AddDate(-100, 0, 0)
+)
+
 // +kubebuilder:rbac:groups=chancla.vshn.io,namespace=chancla-system,resources=runbooks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=chancla.vshn.io,namespace=chancla-system,resources=runbooks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=chancla.vshn.io,namespace=chancla-system,resources=runbooks/finalizers,verbs=update
@@ -54,6 +63,16 @@ type RunbookReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	result, err := r.reconcile(ctx, req)
+	if err != nil || result != (ctrl.Result{}) {
+		return result, err
+	}
+
+	// Requeue with default value if not a specific value provided.
+	return ctrl.Result{RequeueAfter: defaultRequeueAfter}, nil
+}
+
+func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
 
 	// Get the Runbook resource and handle not found and deletion cases
@@ -79,16 +98,9 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			Reason:  "Reconciling",
 			Message: "Starting reconciliation",
 		})
-		if statusErr := r.Status().Update(ctx, &rb); statusErr != nil {
-			l.Error(statusErr, "failed to update Runbook status")
-			return ctrl.Result{}, statusErr
-		}
-
-		// After updating the status, we re-fetch the Runbook to ensure we are working with
-		// the latest version of the object from the API server.
-		if fetchErr := r.Get(ctx, req.NamespacedName, &rb); fetchErr != nil {
-			l.Error(fetchErr, "Failed to re-fetch Runbook")
-			return ctrl.Result{}, fetchErr
+		if err := r.Status().Update(ctx, &rb); err != nil {
+			l.Error(err, "failed to update Runbook status")
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -96,12 +108,7 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	childJobs := &batchv1.JobList{}
 	if err := r.List(ctx, childJobs, client.InNamespace(req.Namespace), client.MatchingFields{".metadata.controller": req.Name}); err != nil {
 		l.Error(err, "Unable to list child Jobs")
-		// Before updating, ensure we have the latest state of the resource to avoid
-		// conflict errors (e.g. "the object has been modified").
-		if fetchErr := r.Get(ctx, req.NamespacedName, &rb); fetchErr != nil {
-			l.Error(fetchErr, "Failed to re-fetch Runbook")
-			return ctrl.Result{}, fetchErr
-		}
+
 		// Update status condition to reflect the error
 		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
 			Type:    typeDegradedRunbook,
@@ -116,45 +123,45 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// find the active list of jobs
-	activeJobs := []*batchv1.Job{}
-	successfulJobs := []*batchv1.Job{}
-	failedJobs := []*batchv1.Job{}
-	mostRecentTime := &time.Time{} // find the last run so we can update the status
+	activeJobs := []batchv1.Job{}
+	successfulJobs := []batchv1.Job{}
+	failedJobs := []batchv1.Job{}
+	mostRecentTime := aHundredYearsAgo // set to 100y ago, so we defenitly have a valid comparsion
 
 	// categorise child Jobs
 	for i, job := range childJobs.Items {
 		_, finishedType := jobIsFinished(&job)
 		switch finishedType {
 		case "": // ongoing
-			activeJobs = append(activeJobs, &childJobs.Items[i])
+			activeJobs = append(activeJobs, childJobs.Items[i])
 		case batchv1.JobFailed:
-			failedJobs = append(failedJobs, &childJobs.Items[i])
+			failedJobs = append(failedJobs, childJobs.Items[i])
 		case batchv1.JobComplete:
-			successfulJobs = append(successfulJobs, &childJobs.Items[i])
+			successfulJobs = append(successfulJobs, childJobs.Items[i])
 		}
 
 		// We'll store the launch time in an annotation, so we'll reconstitute that from
 		// the active jobs themselves.
-		scheduledTimeForJob, err := jobScheduledTime(&job)
+		scheduledTimeForJob, err := jobScheduledTime(job)
 		if err != nil {
 			l.Error(err, "unable to parse schedule time for child job", "job", &job)
 			continue
 		}
-		if scheduledTimeForJob != nil {
-			if mostRecentTime == nil || mostRecentTime.Before(*scheduledTimeForJob) {
-				mostRecentTime = scheduledTimeForJob
-			}
+		if mostRecentTime.Before(scheduledTimeForJob) {
+			mostRecentTime = scheduledTimeForJob
 		}
 	}
 
-	if mostRecentTime != nil {
-		rb.Status.LastScheduleTime = &metav1.Time{Time: *mostRecentTime}
+	if mostRecentTime != aHundredYearsAgo {
+		rb.Status.LastScheduleTime = &metav1.Time{Time: mostRecentTime}
 	} else {
 		rb.Status.LastScheduleTime = nil
 	}
+
+	// 👇 TODO: Do we need a reference to the last active Job?
 	rb.Status.Active = nil
 	for _, activeJob := range activeJobs {
-		jobRef, err := ref.GetReference(r.Scheme, activeJob)
+		jobRef, err := ref.GetReference(r.Scheme, &activeJob)
 		if err != nil {
 			l.Error(err, "unable to make reference to active job", "job", activeJob)
 			continue
@@ -163,6 +170,7 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Update status conditions based on current state
+	// 👇 TODO: evaluate if all these stati are relevant for a Runbook.
 	if len(failedJobs) > 0 {
 		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
 			Type:    typeDegradedRunbook,
@@ -208,59 +216,17 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, statusErr
 	}
 
-	// Clean up old jobs according to the history limit
-	failedJobsHistoryLimit := 3
-	successfulJobsHistoryLimit := 10
-
-	// NB: deleting these are "best effort" -- if we fail on a particular one,
+	// Clean up old jobs according to the history limit.
+	// Deleting these are "best effort" -- if we fail on a particular one,
 	// we won't requeue just to finish the deleting.
-	slices.SortStableFunc(failedJobs, func(a, b *batchv1.Job) int {
-		aStartTime := a.Status.StartTime
-		bStartTime := b.Status.StartTime
-		if aStartTime == nil && bStartTime != nil {
-			return 1
-		}
-		if aStartTime.Before(bStartTime) {
-			return -1
-		} else if bStartTime.Before(aStartTime) {
-			return 1
-		}
-		return 0
-	})
-	for i, job := range failedJobs {
-		if i >= len(failedJobs)-failedJobsHistoryLimit {
-			break
-		}
-		if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
-			l.Error(err, "unable to delete old failed job", "job", job)
-		} else {
-			l.Info("deleted old failed job", "job", job)
-		}
+	slices.SortStableFunc(failedJobs, jobSortFunc)
+	if err := jobDeleteOutsideOfHistory(ctx, r, failedJobs, failedJobsHistoryLimit); err != nil {
+		l.Error(err, "failed to delete old failed jobs")
 	}
 
-	slices.SortStableFunc(successfulJobs, func(a, b *batchv1.Job) int {
-		aStartTime := a.Status.StartTime
-		bStartTime := b.Status.StartTime
-		if aStartTime == nil && bStartTime != nil {
-			return 1
-		}
-
-		if aStartTime.Before(bStartTime) {
-			return -1
-		} else if bStartTime.Before(aStartTime) {
-			return 1
-		}
-		return 0
-	})
-	for i, job := range successfulJobs {
-		if i >= len(failedJobs)-successfulJobsHistoryLimit {
-			break
-		}
-		if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
-			l.Error(err, "unable to delete old successful job", "job", job)
-		} else {
-			l.Info("deleted old successful job", "job", job)
-		}
+	slices.SortStableFunc(successfulJobs, jobSortFunc)
+	if err := jobDeleteOutsideOfHistory(ctx, r, successfulJobs, successfulJobsHistoryLimit); err != nil {
+		l.Error(err, "failed to delete old successful jobs")
 	}
 
 	// Retrieve the alerts from Alertmanager based on the matchers defined in the Runbook spec
@@ -271,16 +237,14 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Update status firingAlerts based on current alerts
-	rb.Status.FiringAlerts = alerts
-	if statusErr := r.Status().Update(ctx, &rb); statusErr != nil {
-		l.Error(statusErr, "Failed to update Runbook status")
-		return ctrl.Result{}, statusErr
-	}
-	// After updating the status, we re-fetch the Runbook to ensure we are working with
-	// the latest version of the object from the API server.
-	if fetchErr := r.Get(ctx, req.NamespacedName, &rb); fetchErr != nil {
-		l.Error(fetchErr, "Failed to re-fetch Runbook")
-		return ctrl.Result{}, fetchErr
+	if !firingAlertsEqual(rb.Status.FiringAlerts, alerts) {
+		rb.Status.FiringAlerts = alerts
+		if err := r.Status().Update(ctx, &rb); err != nil {
+			l.Error(err, "Failed to update Runbook status")
+			return ctrl.Result{}, err
+		}
+		// 👇 TODO: should we return if alerts are different?
+		// return ctrl.Result{}, nil
 	}
 
 	// We now have the current state of "the world",
@@ -292,8 +256,6 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	//	 * if no Job is running, check when the last Job was running
 	//	 * decide if we can safely run another job
 	// * if no alert is firing, requeue the Runbook for Runbook.Spec.Intervall
-	//
-	// 👇 TODO: from this section on, think about status updates.
 
 	// Requeue if a Job is already running
 	if len(activeJobs) > 0 {
@@ -302,9 +264,13 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Requeue if the last run was in Runbook.Spec.GracePeriodLastRun
-	if time.Since(*mostRecentTime) < rb.Spec.GracePeriodLastRun.Duration {
+	if time.Since(mostRecentTime) < rb.Spec.GracePeriodLastRun.Duration {
 		return ctrl.Result{}, nil
 	}
+
+	// 👇 TODO: What if the last Job failed?
+
+	// 👇 TODO: What if the last Job was successfull but Runbook.Spec.Interval not passed?
 
 	// Create a Kubernetes Job based on the Runbook spec and the retrieved alerts
 	data, err := json.Marshal(rb.Status.FiringAlerts)
@@ -322,10 +288,7 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// ...and create it on the cluster
 	if err := r.Create(ctx, job); err != nil {
 		l.Error(err, "unable to create Job for Runbook", "job", job)
-		if fetchErr := r.Get(ctx, req.NamespacedName, &rb); fetchErr != nil {
-			l.Error(fetchErr, "Failed to re-fetch CronJob")
-			return ctrl.Result{}, fetchErr
-		}
+
 		// Update status condition to reflect the error
 		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
 			Type:    typeDegradedRunbook,
@@ -340,11 +303,6 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	l.Info("created Job for Runbook run", "job", job)
 
-	if fetchErr := r.Get(ctx, req.NamespacedName, &rb); fetchErr != nil {
-		l.Error(fetchErr, "Failed to re-fetch CronJob")
-		return ctrl.Result{}, fetchErr
-	}
-
 	// Update status condition to reflect successful job creation
 	meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
 		Type:    typeProgressingRunbook,
@@ -352,18 +310,38 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		Reason:  "JobCreated",
 		Message: fmt.Sprintf("Created job %s", job.Name),
 	})
-	if statusErr := r.Status().Update(ctx, &rb); statusErr != nil {
-		l.Error(statusErr, "Failed to update CronJob status")
+	if err := r.Status().Update(ctx, &rb); err != nil {
+		l.Error(err, "Failed to update CronJob status")
+		return ctrl.Result{}, err
 	}
 
 	// Requeue after Runbook.Spec.Interval
-	return ctrl.Result{RequeueAfter: rb.Spec.Interval.Duration}, nil // 👈 TODO: simplest of the simple
+	return ctrl.Result{RequeueAfter: rb.Spec.Interval.Duration}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RunbookReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &batchv1.Job{}, ".metadata.controller", func(rawObj client.Object) []string {
+		// grab the job object, extract the owner...
+		job := rawObj.(*batchv1.Job)
+		owner := metav1.GetControllerOf(job)
+		if owner == nil {
+			return nil
+		}
+		// ...make sure it's a Runbook...
+		if owner.APIVersion != chanclavshniov1alpha1.GroupVersion.String() || owner.Kind != "Runbook" {
+			return nil
+		}
+
+		// ...and if so, return it
+		return []string{owner.Name}
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&chanclavshniov1alpha1.Runbook{}).
+		Owns(&batchv1.Job{}).
 		Named("runbook").
 		Complete(r)
 }
@@ -380,17 +358,59 @@ func jobIsFinished(job *batchv1.Job) (bool, batchv1.JobConditionType) {
 }
 
 // A helper to extract the scheduled time from the annotation
-func jobScheduledTime(job *batchv1.Job) (*time.Time, error) {
+func jobScheduledTime(job batchv1.Job) (time.Time, error) {
 	timeRaw := job.Annotations[scheduledTimeAnnotation]
 	if len(timeRaw) == 0 {
-		return nil, nil
+		return aHundredYearsAgo, nil
 	}
 
 	timeParsed, err := time.Parse(time.RFC3339, timeRaw)
 	if err != nil {
-		return nil, err
+		return aHundredYearsAgo, err
 	}
-	return &timeParsed, nil
+	return timeParsed, nil
+}
+
+func jobSortFunc(a, b batchv1.Job) int {
+	if a.Status.StartTime == nil && b.Status.StartTime != nil {
+		return 1
+	}
+	if a.Status.StartTime.Before(b.Status.StartTime) {
+		return -1
+	} else if b.Status.StartTime.Before(a.Status.StartTime) {
+		return 1
+	}
+	return 0
+}
+
+func jobDeleteOutsideOfHistory(ctx context.Context, clt client.Writer, jobs []batchv1.Job, historyLimit int) error {
+	for i, job := range jobs {
+		if i >= len(jobs)-historyLimit {
+			break
+		}
+		if err := clt.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func firingAlertsEqual(a, b []*chanclavshniov1alpha1.RunbookStatusFiringAlert) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, _ := range a {
+		if a[i].Fingerprint != b[i].Fingerprint {
+			return false
+		} else if a[i].StartsAt != b[i].StartsAt {
+			return false
+		} else if a[i].UpdatedAt != b[i].UpdatedAt {
+			return false
+		}
+	}
+
+	return true
 }
 
 func constructJobForRunbook(rb *chanclavshniov1alpha1.Runbook, alerts string) *batchv1.Job {

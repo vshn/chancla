@@ -9197,9 +9197,6 @@ spec:
                       description: annotations represents the annotations from the
                         alert.
                       type: object
-                    endsAt:
-                      description: endsAt defines the time the alert ended.
-                      type: string
                     fingerprint:
                       description: fingerprint represents the Alertmanagers fingerprint
                         of the alert.
