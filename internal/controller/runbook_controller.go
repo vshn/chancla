@@ -284,6 +284,23 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 	// now we must decide how to proceed.
 	// -------------------------------------------------------------------------
 
+	// If the Runbook is suspended we dont want to create any Jobs.
+	if rb.Spec.Suspend != nil && *rb.Spec.Suspend {
+		l.Info("Runbook is suspended, skipping")
+
+		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
+			Type:    typeAvailableRunbook,
+			Status:  metav1.ConditionFalse,
+			Reason:  "Suspended",
+			Message: "Runbook is suspended",
+		})
+		if err := r.Status().Update(ctx, &rb); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, nil
+	}
+
 	// Calculate when the next earliest time would be we could reconcile
 	// this Runbook according to past Jobs.
 	durationToEarliestRerun := rb.Spec.ReconcileInterval.Duration

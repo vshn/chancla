@@ -40,6 +40,12 @@ type RunbookSpec struct {
 	// Matchers is a list of labels on which to match in Alertmanager API to trigger the Runbook.
 	Matchers []string `json:"matchers,omitempty"`
 
+	// suspend tells the controller to suspend subsequent executions, it does
+	// not apply to already started executions.  Defaults to false.
+	// +optional
+	// +kubebuilder:default=false
+	Suspend *bool `json:"suspend,omitempty"`
+
 	// Template defines the job that will be created when executing a Runbook.
 	// +required
 	Template batchv1.JobTemplateSpec `json:"template"`

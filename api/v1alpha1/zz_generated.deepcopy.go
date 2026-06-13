@@ -88,6 +88,11 @@ func (in *RunbookSpec) DeepCopyInto(out *RunbookSpec) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.Suspend != nil {
+		in, out := &in.Suspend, &out.Suspend
+		*out = new(bool)
+		**out = **in
+	}
 	in.Template.DeepCopyInto(&out.Template)
 }
 
