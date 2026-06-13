@@ -59,6 +59,8 @@ var (
 // +kubebuilder:rbac:groups=chancla.vshn.io,namespace=chancla-system,resources=runbooks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=chancla.vshn.io,namespace=chancla-system,resources=runbooks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=chancla.vshn.io,namespace=chancla-system,resources=runbooks/finalizers,verbs=update
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs/status,verbs=get;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -72,6 +74,7 @@ func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{RequeueAfter: defaultRequeueAfter}, nil
 }
 
+// nolint:gocyclo // for now ignore complexity of this function 😬
 func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
 
@@ -335,13 +338,8 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 	// this Runbook according to past Jobs.
 	durationToEarliestRerun := rb.Spec.ReconcileInterval.Duration
 	for _, lst := range lastScheduledTime {
-		earliestRerunForAlert := time.Since(lst) - rb.Spec.GracePeriodLastRun.Duration
-		if earliestRerunForAlert < minimumRequeuAfter {
-			earliestRerunForAlert = minimumRequeuAfter
-		}
-		if earliestRerunForAlert < durationToEarliestRerun {
-			durationToEarliestRerun = earliestRerunForAlert
-		}
+		earliestRerunForAlert := min(time.Since(lst)-rb.Spec.GracePeriodLastRun.Duration, minimumRequeuAfter)
+		durationToEarliestRerun = min(durationToEarliestRerun, earliestRerunForAlert)
 	}
 
 	// We have cleaned up past Jobs according to the history limits,
@@ -355,7 +353,7 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// 👇 TODO: What if the last Job failed?
 
-	// 👇 TODO: What if the last Job was successfull but Runbook.Spec.Interval not passed?
+	// 👇 TODO: What if the last Job was successful but Runbook.Spec.Interval not passed?
 
 	// Create new Jobs for each firing alert that is matched by the Runbook.
 	scheduledTime := time.Now()
@@ -375,7 +373,7 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 
 		// ...and set the controller reference
 		// since this is a new Job we can ignore the error
-		ctrl.SetControllerReference(&rb, &job, r.Scheme)
+		_ = ctrl.SetControllerReference(&rb, &job, r.Scheme)
 
 		// ...and create it on the cluster
 		if err := r.Create(ctx, &job); err != nil {

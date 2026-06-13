@@ -23,6 +23,5 @@ resources:
 # not used by the chancla itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
 - runbook_admin_role.yaml
-- runbook_editor_role.yaml
 - runbook_viewer_role.yaml
 

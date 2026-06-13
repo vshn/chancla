@@ -6,12 +6,13 @@
 # enabling them to delegate specific permissions to other users or groups as needed.
 
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   labels:
     app.kubernetes.io/name: chancla
     app.kubernetes.io/managed-by: kustomize
-  name: runbook-admin-role
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+  name: chancla-runbook-admin-role
 rules:
 - apiGroups:
   - chancla.vshn.io
