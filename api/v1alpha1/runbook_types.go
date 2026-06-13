@@ -48,19 +48,18 @@ type RunbookStatusFiringAlert struct {
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
+type RunbookStatusRunningJob struct {
+	// fingerprint represents the corresponding alert.
+	// +optional
+	Fingerprint string `json:"fingerprint,omitempty"`
+
+	// jobReference represents a pointer to the currently running job.
+	// +optional
+	JobReference corev1.ObjectReference `json:"active,omitempty"`
+}
+
 // RunbookStatus defines the observed state of Runbook.
 type RunbookStatus struct {
-	// active defines a list of pointers to currently running jobs.
-	// +optional
-	// +listType=atomic
-	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=10
-	Active []corev1.ObjectReference `json:"active,omitempty"`
-
-	// lastScheduleTime defines when was the last time the job was successfully scheduled.
-	// +optional
-	LastScheduleTime *metav1.Time `json:"lastScheduleTime,omitempty"`
-
 	// conditions represent the current state of the Runbook resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -76,7 +75,16 @@ type RunbookStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// firingAlerts represent the currently matching active alerts in Alertmanager.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MinItems=1
 	FiringAlerts []*RunbookStatusFiringAlert `json:"firingAlerts,omitempty"`
+
+	// runningJobs defines a list of pointers to currently running jobs.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MinItems=1
+	RunningJobs []*RunbookStatusRunningJob `json:"runningJobs,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -110,4 +118,46 @@ type RunbookList struct {
 
 func init() {
 	SchemeBuilder.Register(&Runbook{}, &RunbookList{})
+}
+
+// CompareStatusFiringAlerts to a given slice of alerts.
+// Requires the given slices to be sorted.
+// Fingerprint is calculated over the Labels, there is no need to
+// compare the LabelSet.
+func (rb *Runbook) CompareStatusFiringAlerts(to []*RunbookStatusFiringAlert) bool {
+	if len(rb.Status.FiringAlerts) != len(to) {
+		return false
+	}
+	for i, this := range rb.Status.FiringAlerts {
+		if this.Fingerprint != to[i].Fingerprint {
+			return false
+		} else if this.StartsAt != to[i].StartsAt {
+			return false
+		} else if this.UpdatedAt != to[i].UpdatedAt {
+			return false
+		}
+	}
+
+	return true
+}
+
+// CompareStatusRunningJobs to a given slice of jobs.
+// Requires the given slices to be sorted.
+// Fingerprint is calculated over the Labels, there is no need to
+// compare the LabelSet.
+func (rb *Runbook) CompareStatusRunningJobs(to []*RunbookStatusRunningJob) bool {
+	if len(rb.Status.RunningJobs) != len(to) {
+		return false
+	}
+	for i, this := range rb.Status.RunningJobs {
+		if this.Fingerprint != to[i].Fingerprint {
+			return false
+		} else if this.JobReference.Name != to[i].JobReference.Name {
+			return false
+		} else if this.JobReference.Namespace != to[i].JobReference.Namespace {
+			return false
+		}
+	}
+
+	return true
 }

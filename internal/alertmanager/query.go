@@ -83,8 +83,17 @@ func (c *AlertmanagerClient) AlertsFromMatchers(matchers []string) ([]*chanclavs
 			Labels:      a.Labels,
 		})
 	}
-	slices.SortStableFunc(alerts, alertSortFunc)
 
+	return alerts, nil
+}
+
+func (c *AlertmanagerClient) SortedAlertsFromMatchers(matchers []string) ([]*chanclavshniov1alpha1.RunbookStatusFiringAlert, error) {
+	alerts, err := c.AlertsFromMatchers(matchers)
+	if err != nil {
+		return nil, err
+	}
+
+	slices.SortStableFunc(alerts, alertSortFunc)
 	return alerts, nil
 }
 
