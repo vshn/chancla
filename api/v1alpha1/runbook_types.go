@@ -116,6 +116,8 @@ type RunbookStatus struct {
 // +kubebuilder:subresource:status
 
 // Runbook is the Schema for the runbooks API
+// +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.conditions[?(@.type=='Available')].reason"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 type Runbook struct {
 	metav1.TypeMeta `json:",inline"`
 

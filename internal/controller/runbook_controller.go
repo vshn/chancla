@@ -131,7 +131,7 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	// List all active jobs, and update the status
+	// List all owned jobs, running and completed
 	childJobs := batchv1.JobList{}
 	if err := r.List(ctx, &childJobs, client.InNamespace(req.Namespace), client.MatchingFields{".metadata.controller": req.Name}); err != nil {
 		l.Error(err, "Unable to list child Jobs")
@@ -149,13 +149,11 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	// find the active list of jobs
+	// ...and categorize them according to their state
 	activeJobs := make(map[string][]batchv1.Job)
 	failedJobs := make(map[string][]batchv1.Job)
 	successfulJobs := make(map[string][]batchv1.Job)
 	lastScheduledTime := make(map[string]time.Time)
-
-	// categorise child Jobs
 	for _, job := range childJobs.Items {
 		_, finishedType := jobIsFinished(&job)
 		fingerprint := jobFingerprint(&job)
@@ -172,13 +170,14 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 			successfulJobs[fingerprint] = append(successfulJobs[fingerprint], job)
 		}
 
-		// Extract the scheduledTime from the Job
+		// ...and extract the scheduledTime from the Job
 		lst := lastScheduledTime[fingerprint]
 		scheduledTimeForJob, err := jobScheduledTime(&job)
 		if err != nil {
 			scheduledTimeForJob = aHundredYearsAgo
 		}
 
+		// ...and update the Jobs last scheduled time
 		if lst.IsZero() {
 			lastScheduledTime[fingerprint] = scheduledTimeForJob
 			continue
@@ -188,71 +187,8 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 			lastScheduledTime[fingerprint] = scheduledTimeForJob
 		}
 	}
-	/*
-		// Update status conditions based on current state
-		// 👇 TODO: evaluate if all these stati are relevant for a Runbook.
-		if len(failedJobs) > 0 {
-			meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-				Type:    typeDegradedRunbook,
-				Status:  metav1.ConditionTrue,
-				Reason:  "JobsFailed",
-				Message: fmt.Sprintf("%d job(s) have failed", len(failedJobs)),
-			})
-			meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-				Type:    typeAvailableRunbook,
-				Status:  metav1.ConditionFalse,
-				Reason:  "JobsFailed",
-				Message: fmt.Sprintf("%d job(s) have failed", len(failedJobs)),
-			})
-		} else if len(activeJobs) > 0 {
-			meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-				Type:    typeProgressingRunbook,
-				Status:  metav1.ConditionTrue,
-				Reason:  "JobsActive",
-				Message: fmt.Sprintf("%d job(s) are currently active", len(activeJobs)),
-			})
-			meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-				Type:    typeAvailableRunbook,
-				Status:  metav1.ConditionTrue,
-				Reason:  "JobsActive",
-				Message: fmt.Sprintf("CronJob is progressing with %d active job(s)", len(activeJobs)),
-			})
-		} else {
-			meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-				Type:    typeAvailableRunbook,
-				Status:  metav1.ConditionTrue,
-				Reason:  "AllJobsCompleted",
-				Message: "All jobs have completed successfully",
-			})
-			meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-				Type:    typeProgressingRunbook,
-				Status:  metav1.ConditionFalse,
-				Reason:  "NoJobsActive",
-				Message: "No jobs are currently active",
-			})
-		}
-		if statusErr := r.Status().Update(ctx, &rb); statusErr != nil {
-			l.Error(statusErr, "unable to update CronJob status")
-			return ctrl.Result{}, statusErr
-		}
-	*/
 
-	// Processing completed and running Jobs
-	//
-	// Clean up old jobs according to the history limit.
-	// Deleting these are "best effort" -- if we fail on a particular one,
-	// we won't requeue just to finish the deleting.
-	// -------------------------------------------------------------------------
-
-	for _, jobs := range failedJobs {
-		slices.SortStableFunc(jobs, jobSortFunc)
-		jobDeleteOutsideOfHistory(ctx, r, jobs, int(*rb.Spec.FailedJobsHistoryLimit))
-	}
-	for _, jobs := range successfulJobs {
-		slices.SortStableFunc(jobs, jobSortFunc)
-		jobDeleteOutsideOfHistory(ctx, r, jobs, int(*rb.Spec.SuccessfulJobsHistoryLimit))
-	}
-
+	// ...and create a list of runningJobs
 	statusRunningJobs := []*chanclavshniov1alpha1.RunbookStatusRunningJob{}
 	for fingerprint, jobs := range activeJobs {
 		for _, job := range jobs {
@@ -278,26 +214,120 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// Processing firing alerts
+	// Update the status condition of the Runbook
 	//
-	// We now have the current state of "the world",
-	// now we must decide how to proceed.
+	// After gathering the current state of the world
+	// update the status of the Runbook, before processing further.
 	// -------------------------------------------------------------------------
 
-	// If the Runbook is suspended we dont want to create any Jobs.
-	if rb.Spec.Suspend != nil && *rb.Spec.Suspend {
-		l.Info("Runbook is suspended, skipping")
+	// First set the condition based on firing alerts,
+	// could be there are currently no Jobs to schedule.
+	if len(alerts) > 0 {
+		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
+			Type:    typeProgressingRunbook,
+			Status:  metav1.ConditionTrue,
+			Reason:  "AlertsFiring",
+			Message: fmt.Sprintf("%d alert(s) are currently firing", len(alerts)),
+		})
+		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
+			Type:    typeAvailableRunbook,
+			Status:  metav1.ConditionTrue,
+			Reason:  "AlertsFiring",
+			Message: fmt.Sprintf("Runbook is progressing with %d active alert(s)", len(alerts)),
+		})
+	} else {
+		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
+			Type:    typeProgressingRunbook,
+			Status:  metav1.ConditionFalse,
+			Reason:  "NoFiringAlerts",
+			Message: "No firing alerts matched by this Runbook",
+		})
+		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
+			Type:    typeAvailableRunbook,
+			Status:  metav1.ConditionTrue,
+			Reason:  "NoFiringAlerts",
+			Message: "No firing alerts matched by this Runbook",
+		})
+	}
 
+	// ...if there are active Jobs, update the condition accordingly
+	count := jobInMapListCount(&activeJobs)
+	if jobInMapListCount(&activeJobs) > 0 {
+		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
+			Type:    typeProgressingRunbook,
+			Status:  metav1.ConditionTrue,
+			Reason:  "JobsActive",
+			Message: fmt.Sprintf("%d job(s) are currently active", count),
+		})
+		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
+			Type:    typeAvailableRunbook,
+			Status:  metav1.ConditionTrue,
+			Reason:  "JobsActive",
+			Message: fmt.Sprintf("Runbook is progressing with %d active job(s)", count),
+		})
+	}
+
+	// ...if there are failed Jobs, update the condition accordingly
+	// Only failed Jobs decide if the Runbook is degraded at this point.
+	count = jobInMapListCount(&failedJobs)
+	if jobInMapListCount(&failedJobs) > 0 {
+		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
+			Type:    typeDegradedRunbook,
+			Status:  metav1.ConditionTrue,
+			Reason:  "JobsFailed",
+			Message: fmt.Sprintf("%d job(s) have failed", count),
+		})
+		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
+			Type:    typeAvailableRunbook,
+			Status:  metav1.ConditionFalse,
+			Reason:  "JobsFailed",
+			Message: fmt.Sprintf("%d job(s) have failed", count),
+		})
+	} else {
+		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
+			Type:    typeDegradedRunbook,
+			Status:  metav1.ConditionFalse,
+			Reason:  "NoFailedJobs",
+			Message: "No Jobs of this Runbook are failing",
+		})
+	}
+
+	// ...if the Runbook is suspended
+	if rb.Spec.Suspend != nil && *rb.Spec.Suspend {
 		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
 			Type:    typeAvailableRunbook,
 			Status:  metav1.ConditionFalse,
 			Reason:  "Suspended",
 			Message: "Runbook is suspended",
 		})
-		if err := r.Status().Update(ctx, &rb); err != nil {
-			return ctrl.Result{}, err
-		}
+	}
 
+	// ...and finally update the Runbook
+	if err := r.Status().Update(ctx, &rb); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Processing the current state of the world
+	//
+	// We now have the current state of "the world",
+	// now we must decide how to proceed.
+	// -------------------------------------------------------------------------
+
+	// Clean up old jobs according to the history limit.
+	// We won't requeue just to finish the deleting.
+	for _, jobs := range failedJobs {
+		slices.SortStableFunc(jobs, jobSortFunc)
+		jobDeleteOutsideOfHistory(ctx, r, jobs, int(*rb.Spec.FailedJobsHistoryLimit))
+	}
+	for _, jobs := range successfulJobs {
+		slices.SortStableFunc(jobs, jobSortFunc)
+		jobDeleteOutsideOfHistory(ctx, r, jobs, int(*rb.Spec.SuccessfulJobsHistoryLimit))
+	}
+
+	// If the Runbook is suspended we dont want to create any Jobs.
+	if rb.Spec.Suspend != nil && *rb.Spec.Suspend {
+		l.Info("Runbook is suspended, skipping")
+		// The status is already set, nothing more to do here.
 		return ctrl.Result{}, nil
 	}
 
@@ -319,6 +349,7 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 	// according to the previously determined earliestRerun,
 	// to process jobs that might still be running.
 	if len(alerts) == 0 {
+		// The status is already set, nothing more to do here.
 		return ctrl.Result{RequeueAfter: durationToEarliestRerun}, nil
 	}
 
@@ -366,7 +397,7 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 		})
 	}
 
-	// Update status runningJobs if they differ
+	// ...and update status runningJobs if they differ
 	slices.SortStableFunc(statusRunningJobs, statusRunningJobSortFunc)
 	if !rb.CompareStatusRunningJobs(statusRunningJobs) {
 		rb.Status.FiringAlerts = alerts
@@ -374,6 +405,12 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{}, err // 👈 TODO: maybe not return here
 		}
 	}
+
+	// Update the status condition of the Runbook
+	//
+	// After processing the Runbook do a final update of the status
+	// to refelect any potential newly created Jobs.
+	// -------------------------------------------------------------------------
 
 	// Update status condition to reflect successful job creation
 	if len(statusRunningJobs) > 0 {
