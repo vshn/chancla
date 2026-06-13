@@ -8,22 +8,41 @@ import (
 
 // RunbookSpec defines the desired state of Runbook
 type RunbookSpec struct {
-	// interval defines the interval at which the Runbook should be reconciled.
+	// reconcileInterval defines the interval at which the Runbook should be reconciled.
 	// +kubebuilder:validation:Format=duration
-	Interval metav1.Duration `json:"interval,omitempty"`
+	// +kubebuilder:default="15m"
+	// +optional
+	ReconcileInterval metav1.Duration `json:"reconcileInterval,omitempty"`
 
 	// gracePeriodLastRun defines the grace period on which to wait before
 	// the Runbook is executed again after the last run.
 	// The grace period will be respected even if a matching alert is still
 	// active and not resolved.
 	// +kubebuilder:validation:Format=duration
+	// +kubebuilder:default="5m"
+	// +optional
 	GracePeriodLastRun metav1.Duration `json:"gracePeriodLastRun,omitempty"`
+
+	// failedJobsHistoryLimit defines the number of failed finished jobs to retain.
+	// This is a pointer to distinguish between explicit zero and not specified.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=3
+	FailedJobsHistoryLimit *int32 `json:"failedJobsHistoryLimit,omitempty"`
+
+	// successfulJobsHistoryLimit defines the number of successful finished jobs to retain.
+	// This is a pointer to distinguish between explicit zero and not specified.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=5
+	SuccessfulJobsHistoryLimit *int32 `json:"successfulJobsHistoryLimit,omitempty"`
 
 	// Matchers is a list of labels on which to match in Alertmanager API to trigger the Runbook.
 	Matchers []string `json:"matchers,omitempty"`
 
-	// Template is the job template that is executed.
-	Template batchv1.JobTemplateSpec `json:"template,omitempty"`
+	// Template defines the job that will be created when executing a Runbook.
+	// +required
+	Template batchv1.JobTemplateSpec `json:"template"`
 }
 
 type RunbookStatusFiringAlert struct {

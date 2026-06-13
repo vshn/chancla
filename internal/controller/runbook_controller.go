@@ -41,9 +41,6 @@ const (
 	alertFingerprintAnnotation = "chancla.vshn.io/alert-fingerprint"
 	managedJobLabel            = "chancla.vshn.io/managed-by"
 
-	failedJobsHistoryLimit     = 3
-	successfulJobsHistoryLimit = 5
-
 	defaultRequeueAfter = 30 * time.Second
 	minimumRequeuAfter  = 5 * time.Second // 👈 TODO: might not be needed
 )
@@ -191,7 +188,6 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 			lastScheduledTime[fingerprint] = scheduledTimeForJob
 		}
 	}
-
 	/*
 		// Update status conditions based on current state
 		// 👇 TODO: evaluate if all these stati are relevant for a Runbook.
@@ -250,11 +246,11 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	for _, jobs := range failedJobs {
 		slices.SortStableFunc(jobs, jobSortFunc)
-		jobDeleteOutsideOfHistory(ctx, r, jobs, failedJobsHistoryLimit)
+		jobDeleteOutsideOfHistory(ctx, r, jobs, int(*rb.Spec.FailedJobsHistoryLimit))
 	}
 	for _, jobs := range successfulJobs {
 		slices.SortStableFunc(jobs, jobSortFunc)
-		jobDeleteOutsideOfHistory(ctx, r, jobs, successfulJobsHistoryLimit)
+		jobDeleteOutsideOfHistory(ctx, r, jobs, int(*rb.Spec.SuccessfulJobsHistoryLimit))
 	}
 
 	statusRunningJobs := []*chanclavshniov1alpha1.RunbookStatusRunningJob{}
@@ -285,10 +281,12 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Processing firing alerts
 	//
 	// We now have the current state of "the world",
-	// now we must decide how to proceed
+	// now we must decide how to proceed.
 	// -------------------------------------------------------------------------
 
-	durationToEarliestRerun := rb.Spec.Interval.Duration
+	// Calculate when the next earliest time would be we could reconcile
+	// this Runbook according to past Jobs.
+	durationToEarliestRerun := rb.Spec.ReconcileInterval.Duration
 	for _, lst := range lastScheduledTime {
 		earliestRerunForAlert := time.Since(lst) - rb.Spec.GracePeriodLastRun.Duration
 		if earliestRerunForAlert < minimumRequeuAfter {
@@ -438,6 +436,16 @@ func jobIsFinished(job *batchv1.Job) (bool, batchv1.JobConditionType) {
 // jobFingerprint returns the fingerprint annotation.
 func jobFingerprint(job *batchv1.Job) string {
 	return job.Annotations[alertFingerprintAnnotation]
+}
+
+// jobInMapListCount returns the total number of jobs in a mapped list.
+func jobInMapListCount(list *map[string][]batchv1.Job) int {
+	count := 0
+	for _, jobs := range *list {
+		count += len(jobs)
+	}
+
+	return count
 }
 
 // A helper to extract the scheduled time from the annotation

@@ -45,9 +45,6 @@ linters:
           - dupl
           - lll
         path: internal/*
-      - linters:
-          - govet
-        text: "encountered struct field .* without JSON tag"
     paths:
       - third_party$
       - builtin$

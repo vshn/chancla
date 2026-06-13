@@ -39,17 +39,21 @@ spec:
           spec:
             description: spec defines the desired state of Runbook
             properties:
+              failedJobsHistoryLimit:
+                default: 3
+                description: |-
+                  failedJobsHistoryLimit defines the number of failed finished jobs to retain.
+                  This is a pointer to distinguish between explicit zero and not specified.
+                format: int32
+                minimum: 0
+                type: integer
               gracePeriodLastRun:
+                default: 5m
                 description: |-
                   gracePeriodLastRun defines the grace period on which to wait before
                   the Runbook is executed again after the last run.
                   The grace period will be respected even if a matching alert is still
                   active and not resolved.
-                format: duration
-                type: string
-              interval:
-                description: interval defines the interval at which the Runbook should
-                  be reconciled.
                 format: duration
                 type: string
               matchers:
@@ -58,8 +62,23 @@ spec:
                 items:
                   type: string
                 type: array
+              reconcileInterval:
+                default: 15m
+                description: reconcileInterval defines the interval at which the Runbook
+                  should be reconciled.
+                format: duration
+                type: string
+              successfulJobsHistoryLimit:
+                default: 5
+                description: |-
+                  successfulJobsHistoryLimit defines the number of successful finished jobs to retain.
+                  This is a pointer to distinguish between explicit zero and not specified.
+                format: int32
+                minimum: 0
+                type: integer
               template:
-                description: Template is the job template that is executed.
+                description: Template defines the job that will be created when executing
+                  a Runbook.
                 properties:
                   metadata:
                     description: |-
@@ -9062,6 +9081,8 @@ spec:
                     - template
                     type: object
                 type: object
+            required:
+            - template
             type: object
           status:
             description: status defines the observed state of Runbook
