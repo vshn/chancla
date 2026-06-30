@@ -1,0 +1,59 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: chancla-system
+rules:
+- apiGroups:
+  - chancla.vshn.io
+  resources:
+  - runbooks
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - chancla.vshn.io
+  resources:
+  - runbooks/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - chancla.vshn.io
+  resources:
+  - runbooks/status
+  verbs:
+  - get
+  - patch
+  - update

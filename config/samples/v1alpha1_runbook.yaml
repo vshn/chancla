@@ -1,0 +1,9 @@
+apiVersion: chancla.vshn.io/v1alpha1
+kind: Runbook
+metadata:
+  labels:
+    app.kubernetes.io/name: chancla
+    app.kubernetes.io/managed-by: kustomize
+  name: runbook-sample
+spec:
+  # TODO(user): Add fields here
