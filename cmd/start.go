@@ -3,6 +3,7 @@ package cmd
 import (
 	"crypto/tls"
 	"os"
+	"time"
 
 	"github.com/bombsimon/logrusr/v4"
 	"github.com/sirupsen/logrus"
@@ -130,9 +131,11 @@ func Start(cmd *cobra.Command, args []string) {
 	// 	ManagedUpstreamClusterVersionName: managedUpstreamClusterVersionName,
 	// })
 	if err = (&controller.RunbookReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		Alertmanager: amClient,
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		Alertmanager:        amClient,
+		DefaultRequeueAfter: 30 * time.Second,
+		MinimumRequeuAfter:  5 * time.Second,
 	}).SetupWithManager(mgr); err != nil {
 		l.Error(err, "unable to create controller", "controller", "PrometheusRule")
 		os.Exit(1)

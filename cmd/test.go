@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -37,7 +38,7 @@ func Test(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	alerts, err := amClient.AlertsFromMatchers(rb.Spec.Matchers)
+	alerts, err := amClient.AlertsFromMatchers(context.Background(), rb.Spec.Matchers)
 	if err != nil {
 		l.Error(err, "failed to query alerts")
 		return

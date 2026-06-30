@@ -9,9 +9,11 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	alertmanagermodels "github.com/prometheus/alertmanager/api/v2/models"
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -25,11 +27,12 @@ import (
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
 
 var (
-	ctx       context.Context
-	cancel    context.CancelFunc
-	testEnv   *envtest.Environment
-	cfg       *rest.Config
-	k8sClient client.Client
+	ctx        context.Context
+	cancel     context.CancelFunc
+	testEnv    *envtest.Environment
+	cfg        *rest.Config
+	k8sClient  client.Client
+	k8sManager ctrl.Manager
 )
 
 func TestControllers(t *testing.T) {
@@ -64,6 +67,29 @@ var _ = BeforeSuite(func() {
 	cfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
+
+	// 👇 TODO: Do this in the other test
+	k8sManager, err = ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: scheme.Scheme,
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	err = (&RunbookReconciler{
+		Client: k8sManager.GetClient(),
+		Scheme: k8sManager.GetScheme(),
+		Alertmanager: &MockAlertmanagerClient{
+			Alerts: alertmanagermodels.GettableAlerts{alert11},
+		},
+		DefaultRequeueAfter: 3 * time.Second,
+		MinimumRequeuAfter:  1 * time.Second,
+	}).SetupWithManager(k8sManager)
+	Expect(err).NotTo(HaveOccurred())
+
+	go func() {
+		defer GinkgoRecover()
+		err = k8sManager.Start(ctx)
+		Expect(err).NotTo(HaveOccurred(), "failed to run manager")
+	}()
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())

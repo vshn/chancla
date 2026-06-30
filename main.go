@@ -16,14 +16,17 @@ const (
 	textAlertmanagerUseTLS      = `Wether to use TLS when connecting to the Alertmanager.`
 	textAlertmanagerInsecureTLS = `Whether to skip TLS verification when connecting to the Alertmanager.`
 
+	textEnableElection = `Enable leader election for controller manager.
+	Enabling this will ensure there is only one active controller manager.`
+	textEnableHTTP2 = `If set, HTTP/2 will be enabled for the metrics and webhook servers`
+	textProbeAddr   = `The address the probe endpoint binds to.`
 	textMetricsAddr = `The address the metrics endpoint binds to.
 Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.`
-	textProbeAddr      = `The address the probe endpoint binds to.`
-	textEnableElection = `Enable leader election for controller manager.
-Enabling this will ensure there is only one active controller manager.`
-	textSecureMetrics = `If set, the metrics endpoint is served securely via HTTPS.
-Use --metrics-secure=false to use HTTP instead.`
-	textEnableHTTP2 = `If set, HTTP/2 will be enabled for the metrics and webhook servers`
+	textMetricsSecure = `If set, the metrics endpoint is served securely via HTTPS.
+	Use --metrics-secure=false to use HTTP instead.`
+	textMetricsCertPath = `The directory that contains the metrics server certificate.`
+	textMetricsCertName = `The name of the metrics server certificate file.`
+	textMetricsCertKey  = `The name of the metrics server key file.`
 )
 
 // RootCmd represents the base command when called without any subcommands
@@ -59,11 +62,14 @@ func init() {
 	RootCmd.PersistentFlags().Bool("alertmanager-use-tls", true, textAlertmanagerUseTLS)
 	RootCmd.PersistentFlags().Bool("alertmanager-insecure-tls", false, textAlertmanagerInsecureTLS)
 
-	StartCmd.PersistentFlags().String("metrics-address", "0", textMetricsAddr)
-	StartCmd.PersistentFlags().String("probe-address", ":8081", textProbeAddr)
-	StartCmd.PersistentFlags().Bool("metrics-secure", true, textSecureMetrics)
 	StartCmd.PersistentFlags().Bool("enable-election", false, textEnableElection)
 	StartCmd.PersistentFlags().Bool("enable-http2", false, textEnableHTTP2)
+	StartCmd.PersistentFlags().String("probe-address", ":8081", textProbeAddr)
+	StartCmd.PersistentFlags().String("metrics-address", "0", textMetricsAddr)
+	StartCmd.PersistentFlags().Bool("metrics-secure", true, textMetricsSecure)
+	StartCmd.PersistentFlags().String("metrics-cert-path", "", textMetricsCertPath)
+	StartCmd.PersistentFlags().String("metrics-cert-name", "tls.crt", textMetricsCertName)
+	StartCmd.PersistentFlags().String("metrics-cert-key", "tls.key", textMetricsCertKey)
 
 	// TestCmd.Flags().String("kubeconfig", "$HOME/.kube/config", "Path to the kubeconfig file.")
 	TestCmd.Flags().String("alertmanager-token", "", "Token for authenticating with the Alertmanager API.")
@@ -73,11 +79,14 @@ func init() {
 		viper.BindPFlag("alertmanager-use-tls", RootCmd.PersistentFlags().Lookup("alertmanager-use-tls")),
 		viper.BindPFlag("alertmanager-insecure-tls", RootCmd.PersistentFlags().Lookup("alertmanager-insecure-tls")),
 
-		viper.BindPFlag("metrics-address", StartCmd.PersistentFlags().Lookup("metrics-address")),
-		viper.BindPFlag("probe-address", StartCmd.PersistentFlags().Lookup("probe-address")),
-		viper.BindPFlag("metrics-secure", StartCmd.PersistentFlags().Lookup("metrics-secure")),
 		viper.BindPFlag("enable-election", StartCmd.PersistentFlags().Lookup("enable-election")),
 		viper.BindPFlag("enable-http2", StartCmd.PersistentFlags().Lookup("enable-http2")),
+		viper.BindPFlag("probe-address", StartCmd.PersistentFlags().Lookup("probe-address")),
+		viper.BindPFlag("metrics-address", StartCmd.PersistentFlags().Lookup("metrics-address")),
+		viper.BindPFlag("metrics-secure", StartCmd.PersistentFlags().Lookup("metrics-secure")),
+		viper.BindPFlag("metrics-cert-path", StartCmd.PersistentFlags().Lookup("metrics-cert-path")),
+		viper.BindPFlag("metrics-cert-name", StartCmd.PersistentFlags().Lookup("metrics-cert-name")),
+		viper.BindPFlag("metrics-cert-key", StartCmd.PersistentFlags().Lookup("metrics-cert-key")),
 
 		// viper.BindPFlag("kubeconfig", ValidateCmd.Flags().Lookup("kubeconfig")),
 		viper.BindPFlag("alertmanager-token", TestCmd.Flags().Lookup("alertmanager-token")),

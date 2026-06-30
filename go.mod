@@ -5,15 +5,18 @@ go 1.25.7
 require (
 	github.com/bombsimon/logrusr/v4 v4.1.0
 	github.com/go-openapi/runtime v0.32.3
+	github.com/go-openapi/strfmt v0.26.3
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
 	github.com/prometheus/alertmanager v0.32.2
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.10.0
 	github.com/spf13/viper v1.21.0
+	github.com/thanhpk/randstr v1.0.6
 	k8s.io/api v0.35.0
 	k8s.io/apimachinery v0.35.0
 	k8s.io/client-go v0.35.0
+	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	sigs.k8s.io/controller-runtime v0.23.3
 )
 
@@ -41,7 +44,6 @@ require (
 	github.com/go-openapi/loads v0.23.3 // indirect
 	github.com/go-openapi/runtime/server-middleware v0.30.0 // indirect
 	github.com/go-openapi/spec v0.22.5 // indirect
-	github.com/go-openapi/strfmt v0.26.3 // indirect
 	github.com/go-openapi/swag v0.25.5 // indirect
 	github.com/go-openapi/swag/cmdutils v0.25.5 // indirect
 	github.com/go-openapi/swag/conv v0.26.0 // indirect
@@ -119,7 +121,6 @@ require (
 	k8s.io/component-base v0.35.0 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
-	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.31.2 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect

@@ -9,15 +9,16 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
+	alertmanagermodels "github.com/prometheus/alertmanager/api/v2/models"
+	"github.com/thanhpk/randstr"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	ref "k8s.io/client-go/tools/reference"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -26,30 +27,19 @@ import (
 	"github.com/vshn/chancla/internal/alertmanager"
 )
 
-// Definitions to manage status conditions
-const (
-	// typeAvailableRunbook represents the status of the Runbook reconciliation
-	typeAvailableRunbook = "Available"
-	// typeProgressingRunbook represents the status used when the Runbook is being reconciled
-	typeProgressingRunbook = "Progressing"
-	// typeDegradedRunbook represents the status used when the Runbook has encountered an error
-	typeDegradedRunbook = "Degraded"
-)
-
 const (
 	scheduledTimeAnnotation    = "chancla.vshn.io/scheduled-at"
 	alertFingerprintAnnotation = "chancla.vshn.io/alert-fingerprint"
 	managedJobLabel            = "chancla.vshn.io/managed-by"
-
-	defaultRequeueAfter = 30 * time.Second
-	minimumRequeuAfter  = 5 * time.Second // 👈 TODO: might not be needed
 )
 
 // RunbookReconciler reconciles a Runbook object
 type RunbookReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	Alertmanager *alertmanager.AlertmanagerClient
+	Scheme              *runtime.Scheme
+	Alertmanager        alertmanager.AlertmanagerReader
+	DefaultRequeueAfter time.Duration
+	MinimumRequeuAfter  time.Duration
 }
 
 var (
@@ -65,252 +55,55 @@ var (
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *RunbookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	result, err := r.reconcile(ctx, req)
-	if err != nil || result != (ctrl.Result{}) {
-		return result, err
-	}
-
-	// Requeue with default value if not a specific value provided.
-	return ctrl.Result{RequeueAfter: defaultRequeueAfter}, nil
-}
-
-// nolint:gocyclo // for now ignore complexity of this function 😬
-func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	l := log.FromContext(ctx)
-
 	// Get the Runbook resource and handle not found and deletion cases
 	rb := chanclavshniov1alpha1.Runbook{}
-	if fetchErr := r.Get(ctx, req.NamespacedName, &rb); fetchErr != nil {
-		if apierrors.IsNotFound(fetchErr) {
+	if err := r.Get(ctx, req.NamespacedName, &rb); err != nil {
+		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
-
-		// Error reading the object - requeue the request.
-		l.Error(fetchErr, "Failed to fetch the Runbook")
-		return ctrl.Result{}, fetchErr
+		return ctrl.Result{}, err
 	}
+
+	status := r.reconcile(ctx, req, rb)
+	if err := status.updateRunbookStatus(ctx, r.Client, rb); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return status.ReconcileResult()
+}
+
+func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request, rb chanclavshniov1alpha1.Runbook) *RunbookReconcilerStatus {
+	status := &RunbookReconcilerStatus{}
+
 	if !rb.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
-	}
-
-	// Initialize status conditions if not yet present
-	if len(rb.Status.Conditions) == 0 {
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeProgressingRunbook,
-			Status:  metav1.ConditionUnknown,
-			Reason:  "Reconciling",
-			Message: "Starting reconciliation",
-		})
-		if err := r.Status().Update(ctx, &rb); err != nil {
-			l.Error(err, "failed to update Runbook status")
-			return ctrl.Result{}, err
-		}
+		return status
 	}
 
 	// Gathering the state of the world
 	// -------------------------------------------------------------------------
 
-	// Retrieve the alerts from Alertmanager based on the matchers defined in the Runbook
-	alerts, err := r.Alertmanager.SortedAlertsFromMatchers(rb.Spec.Matchers)
+	// Retrieve the firing alerts from Alertmanager based on the matchers defined in the Runbook
+	alerts, err := r.getAlertsFromAlertmanager(ctx, rb.Spec.Matchers)
 	if err != nil {
-		return ctrl.Result{}, err
+		return status.WithDuration(r.MinimumRequeuAfter).WithError(err)
 	}
 
-	// ...and update status firingAlerts if they differ
-	if !rb.CompareStatusFiringAlerts(alerts) {
-		rb.Status.FiringAlerts = alerts
-		if err := r.Status().Update(ctx, &rb); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-	// ...and update status condition
-	meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-		Type:    typeProgressingRunbook,
-		Status:  metav1.ConditionTrue,
-		Reason:  "AlertsFiring",
-		Message: fmt.Sprintf("%d firing alerts", len(alerts)),
-	})
-	if statusErr := r.Status().Update(ctx, &rb); statusErr != nil {
-		return ctrl.Result{}, err
-	}
+	status.FiringAlerts = convertAlertsToStatusFiringAlerts(alerts)
+	status.FiringAlertsCount = len(alerts)
 
 	// List all owned jobs, running and completed
-	childJobs := batchv1.JobList{}
-	if err := r.List(ctx, &childJobs, client.InNamespace(req.Namespace), client.MatchingFields{".metadata.controller": req.Name}); err != nil {
-		l.Error(err, "Unable to list child Jobs")
-
-		// Update status condition to reflect the error
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeDegradedRunbook,
-			Status:  metav1.ConditionTrue,
-			Reason:  "ReconciliationError",
-			Message: fmt.Sprintf("Failed to list child jobs: %v", err),
-		})
-		if statusErr := r.Status().Update(ctx, &rb); statusErr != nil {
-			l.Error(statusErr, "Failed to update Runbook status")
-		}
-		return ctrl.Result{}, err
+	jobs := batchv1.JobList{}
+	if err := r.List(ctx, &jobs, client.InNamespace(req.Namespace), client.MatchingFields{".metadata.controller": req.Name}); err != nil {
+		return status.WithDuration(r.MinimumRequeuAfter).WithError(err)
 	}
 
-	// ...and categorize them according to their state
-	activeJobs := make(map[string][]batchv1.Job)
-	failedJobs := make(map[string][]batchv1.Job)
-	successfulJobs := make(map[string][]batchv1.Job)
-	lastScheduledTime := make(map[string]time.Time)
-	for _, job := range childJobs.Items {
-		_, finishedType := jobIsFinished(&job)
-		fingerprint := jobFingerprint(&job)
-		if fingerprint == "" {
-			continue // Skip the Job if it has no fingerprint annotation
-		}
+	activeJobs, failedJobs, successfulJobs, lastScheduledTime := splitJobListBasedOnType(jobs)
 
-		switch finishedType {
-		case "": // ongoing
-			activeJobs[fingerprint] = append(activeJobs[fingerprint], job)
-		case batchv1.JobFailed:
-			failedJobs[fingerprint] = append(failedJobs[fingerprint], job)
-		case batchv1.JobComplete:
-			successfulJobs[fingerprint] = append(successfulJobs[fingerprint], job)
-		}
+	status.RunningJobs = convertJobsMapToStatusRunningJobs(activeJobs)
+	status.RunningJobsCount = countJobsInMappedList(activeJobs)
+	status.FailedJobsCount = countJobsInMappedList(failedJobs)
 
-		// ...and extract the scheduledTime from the Job
-		lst := lastScheduledTime[fingerprint]
-		scheduledTimeForJob, err := jobScheduledTime(&job)
-		if err != nil {
-			scheduledTimeForJob = aHundredYearsAgo
-		}
-
-		// ...and update the Jobs last scheduled time
-		if lst.IsZero() {
-			lastScheduledTime[fingerprint] = scheduledTimeForJob
-			continue
-		}
-
-		if lastScheduledTime[fingerprint].Before(scheduledTimeForJob) {
-			lastScheduledTime[fingerprint] = scheduledTimeForJob
-		}
-	}
-
-	// ...and create a list of runningJobs
-	statusRunningJobs := []*chanclavshniov1alpha1.RunbookStatusRunningJob{}
-	for fingerprint, jobs := range activeJobs {
-		for _, job := range jobs {
-			jobRef, err := ref.GetReference(r.Scheme, &job)
-			if err != nil {
-				l.Error(err, "unable to make reference to active job", "job", job)
-				continue
-			}
-
-			statusRunningJobs = append(statusRunningJobs, &chanclavshniov1alpha1.RunbookStatusRunningJob{
-				Fingerprint:  fingerprint,
-				JobReference: *jobRef,
-			})
-		}
-	}
-
-	// ...and update status runningJobs if they differ
-	slices.SortStableFunc(statusRunningJobs, statusRunningJobSortFunc)
-	if !rb.CompareStatusRunningJobs(statusRunningJobs) {
-		rb.Status.FiringAlerts = alerts
-		if err := r.Status().Update(ctx, &rb); err != nil {
-			return ctrl.Result{}, err // 👈 TODO: maybe not return here
-		}
-	}
-
-	// Update the status condition of the Runbook
-	//
-	// After gathering the current state of the world
-	// update the status of the Runbook, before processing further.
-	// -------------------------------------------------------------------------
-
-	// First set the condition based on firing alerts,
-	// could be there are currently no Jobs to schedule.
-	if len(alerts) > 0 {
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeProgressingRunbook,
-			Status:  metav1.ConditionTrue,
-			Reason:  "AlertsFiring",
-			Message: fmt.Sprintf("%d alert(s) are currently firing", len(alerts)),
-		})
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeAvailableRunbook,
-			Status:  metav1.ConditionTrue,
-			Reason:  "AlertsFiring",
-			Message: fmt.Sprintf("Runbook is progressing with %d active alert(s)", len(alerts)),
-		})
-	} else {
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeProgressingRunbook,
-			Status:  metav1.ConditionFalse,
-			Reason:  "NoFiringAlerts",
-			Message: "No firing alerts matched by this Runbook",
-		})
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeAvailableRunbook,
-			Status:  metav1.ConditionTrue,
-			Reason:  "NoFiringAlerts",
-			Message: "No firing alerts matched by this Runbook",
-		})
-	}
-
-	// ...if there are active Jobs, update the condition accordingly
-	count := jobInMapListCount(&activeJobs)
-	if jobInMapListCount(&activeJobs) > 0 {
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeProgressingRunbook,
-			Status:  metav1.ConditionTrue,
-			Reason:  "JobsActive",
-			Message: fmt.Sprintf("%d job(s) are currently active", count),
-		})
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeAvailableRunbook,
-			Status:  metav1.ConditionTrue,
-			Reason:  "JobsActive",
-			Message: fmt.Sprintf("Runbook is progressing with %d active job(s)", count),
-		})
-	}
-
-	// ...if there are failed Jobs, update the condition accordingly
-	// Only failed Jobs decide if the Runbook is degraded at this point.
-	count = jobInMapListCount(&failedJobs)
-	if jobInMapListCount(&failedJobs) > 0 {
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeDegradedRunbook,
-			Status:  metav1.ConditionTrue,
-			Reason:  "JobsFailed",
-			Message: fmt.Sprintf("%d job(s) have failed", count),
-		})
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeAvailableRunbook,
-			Status:  metav1.ConditionFalse,
-			Reason:  "JobsFailed",
-			Message: fmt.Sprintf("%d job(s) have failed", count),
-		})
-	} else {
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeDegradedRunbook,
-			Status:  metav1.ConditionFalse,
-			Reason:  "NoFailedJobs",
-			Message: "No Jobs of this Runbook are failing",
-		})
-	}
-
-	// ...if the Runbook is suspended
-	if rb.Spec.Suspend != nil && *rb.Spec.Suspend {
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeAvailableRunbook,
-			Status:  metav1.ConditionFalse,
-			Reason:  "Suspended",
-			Message: "Runbook is suspended",
-		})
-	}
-
-	// ...and finally update the Runbook
-	if err := r.Status().Update(ctx, &rb); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Processing the current state of the world
+	// Processing the state of the world
 	//
 	// We now have the current state of "the world",
 	// now we must decide how to proceed.
@@ -318,27 +111,22 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Clean up old jobs according to the history limit.
 	// We won't requeue just to finish the deleting.
-	for _, jobs := range failedJobs {
-		slices.SortStableFunc(jobs, jobSortFunc)
-		jobDeleteOutsideOfHistory(ctx, r, jobs, int(*rb.Spec.FailedJobsHistoryLimit))
-	}
-	for _, jobs := range successfulJobs {
-		slices.SortStableFunc(jobs, jobSortFunc)
-		jobDeleteOutsideOfHistory(ctx, r, jobs, int(*rb.Spec.SuccessfulJobsHistoryLimit))
-	}
+	status.FailedJobsCount -= r.deleteJobsOutsideOfHistory(ctx, failedJobs, int(*rb.Spec.FailedJobsHistoryLimit)) // 👈 TODO: well, thats ugly
+	_ = r.deleteJobsOutsideOfHistory(ctx, successfulJobs, int(*rb.Spec.SuccessfulJobsHistoryLimit))
 
 	// If the Runbook is suspended we dont want to create any Jobs.
 	if rb.Spec.Suspend != nil && *rb.Spec.Suspend {
-		l.Info("Runbook is suspended, skipping")
+		log.FromContext(ctx).Info("Runbook is suspended, skipping")
 		// The status is already set, nothing more to do here.
-		return ctrl.Result{}, nil
+		return status
 	}
 
 	// Calculate when the next earliest time would be we could reconcile
 	// this Runbook according to past Jobs.
-	durationToEarliestRerun := rb.Spec.ReconcileInterval.Duration
+	// 👇 TODO: this is probably not correct if the last rerun of a job was _not_ a fail
+	durationToEarliestRerun := max(rb.Spec.ReconcileInterval.Duration, r.MinimumRequeuAfter)
 	for _, lst := range lastScheduledTime {
-		earliestRerunForAlert := min(time.Since(lst)-rb.Spec.GracePeriodLastRun.Duration, minimumRequeuAfter)
+		earliestRerunForAlert := max(time.Since(lst)-rb.Spec.GracePeriodLastRun.Duration, r.MinimumRequeuAfter)
 		durationToEarliestRerun = min(durationToEarliestRerun, earliestRerunForAlert)
 	}
 
@@ -346,9 +134,10 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 	// if there are no firing alerts we can return and reconcile next
 	// according to the previously determined earliestRerun,
 	// to process jobs that might still be running.
-	if len(alerts) == 0 {
+	// 👇 TODO: this is can be ditched
+	if status.FiringAlertsCount == 0 {
 		// The status is already set, nothing more to do here.
-		return ctrl.Result{RequeueAfter: durationToEarliestRerun}, nil
+		return status.WithDuration(durationToEarliestRerun)
 	}
 
 	// 👇 TODO: What if the last Job failed?
@@ -360,14 +149,15 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 	countJobsFailed := 0
 	for _, a := range alerts {
 		// Skip if an active Job is running
-		if len(activeJobs[a.Fingerprint]) > 0 {
+		if len(activeJobs[*a.Fingerprint]) > 0 {
 			break
 		}
 
 		// Construct a new Job based on the firing alert
-		job, err := constructJobForAlert(&rb, a, scheduledTime)
+		job, err := convertGettableAlertToJob(rb, a, scheduledTime)
+		// JOHO: implement here
 		if err != nil {
-			l.Error(err, "failed to construct Job", "job", job)
+			log.FromContext(ctx).Error(err, "failed to convert alert", "alert", a)
 			continue
 		}
 
@@ -377,73 +167,15 @@ func (r *RunbookReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 
 		// ...and create it on the cluster
 		if err := r.Create(ctx, &job); err != nil {
-			l.Error(err, "unable to create Job for Runbook", "job", job)
+			log.FromContext(ctx).Error(err, "unable to create Job for Runbook", "job", job)
 			countJobsFailed++
 			continue
 		}
-		l.Info("created Job for Runbook run", "job", job)
 
-		// 👇 TODO: Do we need a reference to the last running Job?
-		jobRef, err := ref.GetReference(r.Scheme, &job)
-		if err != nil {
-			l.Error(err, "unable to make reference to created job", "job", job)
-			continue
-		}
-		statusRunningJobs = append(statusRunningJobs, &chanclavshniov1alpha1.RunbookStatusRunningJob{
-			Fingerprint:  a.Fingerprint,
-			JobReference: *jobRef,
-		})
+		log.FromContext(ctx).Info("created Job for Runbook run", "name", job.Name, "namespace", job.Namespace)
 	}
 
-	// ...and update status runningJobs if they differ
-	slices.SortStableFunc(statusRunningJobs, statusRunningJobSortFunc)
-	if !rb.CompareStatusRunningJobs(statusRunningJobs) {
-		rb.Status.FiringAlerts = alerts
-		if err := r.Status().Update(ctx, &rb); err != nil {
-			return ctrl.Result{}, err // 👈 TODO: maybe not return here
-		}
-	}
-
-	// Update the status condition of the Runbook
-	//
-	// After processing the Runbook do a final update of the status
-	// to refelect any potential newly created Jobs.
-	// -------------------------------------------------------------------------
-
-	// Update status condition to reflect successful job creation
-	if len(statusRunningJobs) > 0 {
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeProgressingRunbook,
-			Status:  metav1.ConditionTrue,
-			Reason:  "JobsActive",
-			Message: fmt.Sprintf("%d job(s) are currently active", len(statusRunningJobs)),
-		})
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeAvailableRunbook,
-			Status:  metav1.ConditionTrue,
-			Reason:  "JobsActive",
-			Message: fmt.Sprintf("Runbook is progressing with %d active job(s)", len(statusRunningJobs)),
-		})
-	}
-	if countJobsFailed > 0 {
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeDegradedRunbook,
-			Status:  metav1.ConditionTrue,
-			Reason:  "JobCreationFailed",
-			Message: fmt.Sprintf(" Failed createing %d jobs", countJobsFailed),
-		})
-		meta.SetStatusCondition(&rb.Status.Conditions, metav1.Condition{
-			Type:    typeAvailableRunbook,
-			Status:  metav1.ConditionFalse,
-			Reason:  "JobCreationFailed",
-			Message: fmt.Sprintf(" Failed createing %d jobs", countJobsFailed),
-		})
-	}
-	if err := r.Status().Update(ctx, &rb); err != nil {
-		return ctrl.Result{}, err // 👈 TODO: maybe not return here
-	}
-
-	return ctrl.Result{RequeueAfter: durationToEarliestRerun}, nil
+	return status.WithDuration(durationToEarliestRerun)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -473,35 +205,66 @@ func (r *RunbookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// jobisFinished returns true if the Job is finished and the batchv1.JobConditionType.
-// If the Job is still active the batchv1.JobConditionType is "".
-func jobIsFinished(job *batchv1.Job) (bool, batchv1.JobConditionType) {
-	for _, c := range job.Status.Conditions {
-		if (c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed) && c.Status == corev1.ConditionTrue {
-			return true, c.Type
+// getAlertsFromAlertmanager gets a list of alerts from Alertmanager
+func (r *RunbookReconciler) getAlertsFromAlertmanager(ctx context.Context, matchers []string) (alertmanagermodels.GettableAlerts, error) {
+	alerts, err := r.Alertmanager.AlertsFromMatchers(ctx, matchers)
+	if err != nil {
+		return nil, err
+	}
+
+	return alerts, nil
+}
+
+// deleteJobsOutsideOfHistory deletes jobs outside of the desired history limit
+// The deletion is checked for every mapped list individually,
+// any potential errors are logged but not acted upon.
+func (r *RunbookReconciler) deleteJobsOutsideOfHistory(ctx context.Context, mappedJobs map[string][]batchv1.Job, historyLimit int) int {
+	deletedJobs := 0
+	for _, jobs := range mappedJobs {
+		slices.SortStableFunc(jobs, sorterFuncJobs)
+		for i, job := range jobs {
+			if i >= len(jobs)-historyLimit {
+				break
+			}
+			if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
+				log.FromContext(ctx).Error(err, "failed to delete job", "job", job)
+			}
+			deletedJobs++
 		}
 	}
 
-	return false, ""
+	return deletedJobs
 }
 
-// jobFingerprint returns the fingerprint annotation.
-func jobFingerprint(job *batchv1.Job) string {
-	return job.Annotations[alertFingerprintAnnotation]
+// Random functions
+//
+// Various helper functions for all kind of stuff.
+// -----------------------------------------------------------------------------
+
+// conditionTypeFromJobStatus returns the JobConditionType from a Job
+// If the Job is still active the JobConditionType is "".
+func conditionTypeFromJobStatus(job batchv1.Job) batchv1.JobConditionType {
+	for _, c := range job.Status.Conditions {
+		if (c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed) && c.Status == corev1.ConditionTrue {
+			return c.Type
+		}
+	}
+
+	return ""
 }
 
-// jobInMapListCount returns the total number of jobs in a mapped list.
-func jobInMapListCount(list *map[string][]batchv1.Job) int {
+// countJobsInMappedList returns the total number of jobs in a mapped list.
+func countJobsInMappedList(list map[string][]batchv1.Job) int {
 	count := 0
-	for _, jobs := range *list {
+	for _, jobs := range list {
 		count += len(jobs)
 	}
 
 	return count
 }
 
-// A helper to extract the scheduled time from the annotation
-func jobScheduledTime(job *batchv1.Job) (time.Time, error) {
+// extractScheduledTimeFromJob extracts the scheduled time from a Jobs annotation
+func extractScheduledTimeFromJob(job batchv1.Job) (time.Time, error) {
 	timeRaw := job.Annotations[scheduledTimeAnnotation]
 	if len(timeRaw) == 0 {
 		return aHundredYearsAgo, nil
@@ -514,7 +277,81 @@ func jobScheduledTime(job *batchv1.Job) (time.Time, error) {
 	return timeParsed, nil
 }
 
-func jobSortFunc(a, b batchv1.Job) int {
+// splitJobListBasedOnType returns separate mapped lists of Jobs based on their conditionType and their last scheduled time
+// The returned mapped lists are active, failed and successful jobs.
+// The last returned value is a map of each last scheduled time based on the alerts fingerprint.
+func splitJobListBasedOnType(jobs batchv1.JobList) (map[string][]batchv1.Job, map[string][]batchv1.Job, map[string][]batchv1.Job, map[string]time.Time) {
+	activeJobs := make(map[string][]batchv1.Job)
+	failedJobs := make(map[string][]batchv1.Job)
+	successfulJobs := make(map[string][]batchv1.Job)
+	lastScheduledTime := make(map[string]time.Time)
+	for _, job := range jobs.Items {
+		conditionType := conditionTypeFromJobStatus(job)
+		fingerprint := job.Annotations[alertFingerprintAnnotation]
+		if fingerprint == "" {
+			// Skip the Job if it has no fingerprint annotation
+			continue
+		}
+
+		switch conditionType {
+		case "": // ongoing
+			activeJobs[fingerprint] = append(activeJobs[fingerprint], job)
+		case batchv1.JobFailed:
+			failedJobs[fingerprint] = append(failedJobs[fingerprint], job)
+		case batchv1.JobComplete:
+			successfulJobs[fingerprint] = append(successfulJobs[fingerprint], job)
+		}
+
+		// ...and extract the scheduledTime from the Job
+		lst := lastScheduledTime[fingerprint]
+		scheduledTimeForJob, err := extractScheduledTimeFromJob(job)
+		if err != nil {
+			scheduledTimeForJob = aHundredYearsAgo
+		}
+
+		// ...and update the Jobs last scheduled time
+		if lst.IsZero() {
+			lastScheduledTime[fingerprint] = scheduledTimeForJob
+			continue
+		}
+
+		if lastScheduledTime[fingerprint].Before(scheduledTimeForJob) {
+			lastScheduledTime[fingerprint] = scheduledTimeForJob
+		}
+	}
+
+	return activeJobs, failedJobs, successfulJobs, lastScheduledTime
+}
+
+// Sorter functions
+//
+// Helper functions to sort various lists.
+// -----------------------------------------------------------------------------
+
+// sorterFuncStatusFiringAlerts provides the comparison function for sorting RunbookStatusFiringAlerts
+func sorterFuncStatusFiringAlerts(a, b chanclavshniov1alpha1.RunbookStatusFiringAlert) int {
+	// Alertmanager computes the fingerprint from the label set of the alert,
+	// specifically the combination of all label key-value pairs.
+	// Nothing else (annotations, startsAt, endsAt, generatorURL) is included.
+	return cmp.Compare(a.Fingerprint, b.Fingerprint)
+}
+
+// sorterFuncStatusRunningJobs provides the comparison function for sorting RunbookStatusRunningJobs
+func sorterFuncStatusRunningJobs(a, b chanclavshniov1alpha1.RunbookStatusRunningJob) int {
+	if a.Fingerprint != b.Fingerprint {
+		return cmp.Compare(a.Fingerprint, b.Fingerprint)
+	}
+	if a.Namespace != b.Namespace {
+		return cmp.Compare(a.Namespace, b.Namespace)
+	}
+	if a.Name != b.Name {
+		return cmp.Compare(a.Name, b.Name)
+	}
+	return 0
+}
+
+// sorterFuncJobs provides the comparison function for sorting Jobs based on their actual start time
+func sorterFuncJobs(a, b batchv1.Job) int {
 	if a.Status.StartTime == nil && b.Status.StartTime != nil {
 		return 1
 	}
@@ -526,35 +363,50 @@ func jobSortFunc(a, b batchv1.Job) int {
 	return 0
 }
 
-func statusRunningJobSortFunc(a, b *chanclavshniov1alpha1.RunbookStatusRunningJob) int {
-	if a.Fingerprint != b.Fingerprint {
-		return cmp.Compare(a.Fingerprint, b.Fingerprint)
+// Converter functions
+//
+// Helper functions to convert various things to other things.
+// -----------------------------------------------------------------------------
+
+// convertAlertsToStatusFiringAlerts converts a list of alerts to the corresponding RunbookStatusFiringAlerts
+func convertAlertsToStatusFiringAlerts(alerts alertmanagermodels.GettableAlerts) []chanclavshniov1alpha1.RunbookStatusFiringAlert {
+	statusFiringAlerts := make([]chanclavshniov1alpha1.RunbookStatusFiringAlert, 0, len(alerts))
+	for _, a := range alerts {
+		statusFiringAlerts = append(statusFiringAlerts, chanclavshniov1alpha1.RunbookStatusFiringAlert{
+			Fingerprint: *a.Fingerprint,
+			StartsAt:    a.StartsAt.String(),
+			UpdatedAt:   a.UpdatedAt.String(),
+			Annotations: a.Annotations,
+			Labels:      a.Labels,
+		})
 	}
-	if a.JobReference.Namespace != b.JobReference.Namespace {
-		return cmp.Compare(a.JobReference.Namespace, b.JobReference.Namespace)
-	}
-	if a.JobReference.Name != b.JobReference.Name {
-		return cmp.Compare(a.JobReference.Name, b.JobReference.Name)
-	}
-	return 0
+
+	slices.SortStableFunc(statusFiringAlerts, sorterFuncStatusFiringAlerts)
+	return statusFiringAlerts
 }
 
-func jobDeleteOutsideOfHistory(ctx context.Context, clt client.Writer, jobs []batchv1.Job, historyLimit int) {
-	l := log.FromContext(ctx)
-
-	for i, job := range jobs {
-		if i >= len(jobs)-historyLimit {
-			break
-		}
-		if err := clt.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
-			l.Error(err, "failed to delete job", "job", job)
+// convertJobsMapToStatusRunningJobs converts a map of active jobs to the corresponding RunbookStatusRunningJobs
+func convertJobsMapToStatusRunningJobs(activeJobs map[string][]batchv1.Job) []chanclavshniov1alpha1.RunbookStatusRunningJob {
+	statusRunningJobs := make([]chanclavshniov1alpha1.RunbookStatusRunningJob, countJobsInMappedList(activeJobs))
+	for fingerprint, jobs := range activeJobs {
+		for _, job := range jobs {
+			statusRunningJobs = append(statusRunningJobs, chanclavshniov1alpha1.RunbookStatusRunningJob{
+				Fingerprint: fingerprint,
+				APIVersion:  job.APIVersion,
+				Kind:        job.Kind,
+				Name:        job.Name,
+				Namespace:   job.Namespace,
+			})
 		}
 	}
+
+	slices.SortStableFunc(statusRunningJobs, sorterFuncStatusRunningJobs)
+	return statusRunningJobs
 }
 
-func constructJobForAlert(rb *chanclavshniov1alpha1.Runbook, alert *chanclavshniov1alpha1.RunbookStatusFiringAlert, scheduledTime time.Time) (batchv1.Job, error) {
-	// We want job names for a given nominal start time to have a deterministic name to avoid the same job being created twice
-	name := fmt.Sprintf("%s-%s-%d", rb.Name, alert.Fingerprint, time.Now().UTC().Unix())
+// convertGettableAlertToJob converts an alert to a Job for scheduling on the cluster
+func convertGettableAlertToJob(rb chanclavshniov1alpha1.Runbook, alert *alertmanagermodels.GettableAlert, scheduledTime time.Time) (batchv1.Job, error) {
+	name := fmt.Sprintf("%s-%s-%s", rb.Name, *alert.Fingerprint, randstr.Hex(8))
 	if len(name) > 63 {
 		digest := sha256.Sum256([]byte(name))
 		name = name[0:52] + "-" + hex.EncodeToString(digest[0:])[0:10]
@@ -566,7 +418,7 @@ func constructJobForAlert(rb *chanclavshniov1alpha1.Runbook, alert *chanclavshni
 	maps.Copy(annotations, tmpl.Annotations)
 	maps.Copy(annotations, map[string]string{
 		scheduledTimeAnnotation:    scheduledTime.Format(time.RFC3339),
-		alertFingerprintAnnotation: "le fingerprint"}, // 👈 TODO: add proper fingerprint
+		alertFingerprintAnnotation: *alert.Fingerprint},
 	)
 
 	labels := make(map[string]string)
@@ -575,7 +427,7 @@ func constructJobForAlert(rb *chanclavshniov1alpha1.Runbook, alert *chanclavshni
 
 	job := batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
+			Name:        strings.ToLower(name),
 			Namespace:   rb.Namespace,
 			Annotations: annotations,
 			Labels:      labels,
@@ -585,17 +437,23 @@ func constructJobForAlert(rb *chanclavshniov1alpha1.Runbook, alert *chanclavshni
 	}
 
 	// Inject the alerts payload as an environment variable into the job template.
-	data, err := json.Marshal(rb.Status.FiringAlerts)
+	data, err := json.Marshal(alert.Labels)
 	if err != nil {
 		return job, err
 	}
 
-	env := corev1.EnvVar{
-		Name:  "ALERT_JSON",
-		Value: string(data),
+	env := []corev1.EnvVar{
+		{
+			Name:  "ALERT_STARTED_AT",
+			Value: alert.StartsAt.String(),
+		},
+		{
+			Name:  "ALERT_LABELS_JSON",
+			Value: string(data),
+		},
 	}
 	for i := range tmpl.Spec.Template.Spec.Containers {
-		tmpl.Spec.Template.Spec.Containers[i].Env = append(tmpl.Spec.Template.Spec.Containers[i].Env, env)
+		tmpl.Spec.Template.Spec.Containers[i].Env = append(tmpl.Spec.Template.Spec.Containers[i].Env, env...)
 	}
 
 	return job, nil

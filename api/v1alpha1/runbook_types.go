@@ -2,7 +2,6 @@ package v1alpha1
 
 import (
 	batchv1 "k8s.io/api/batch/v1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -78,9 +77,24 @@ type RunbookStatusRunningJob struct {
 	// +optional
 	Fingerprint string `json:"fingerprint,omitempty"`
 
-	// jobReference represents a pointer to the currently running job.
+	// API version of the referent.
 	// +optional
-	JobReference corev1.ObjectReference `json:"active,omitempty"`
+	APIVersion string `json:"apiVersion,omitempty" protobuf:"bytes,5,opt,name=apiVersion"`
+
+	// Kind of the referent.
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+	// +optional
+	Kind string `json:"kind,omitempty" protobuf:"bytes,1,opt,name=kind"`
+
+	// Name of the referent.
+	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+	// +optional
+	Name string `json:"name,omitempty" protobuf:"bytes,3,opt,name=name"`
+
+	// Namespace of the referent.
+	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+	// +optional
+	Namespace string `json:"namespace,omitempty" protobuf:"bytes,2,opt,name=namespace"`
 }
 
 // RunbookStatus defines the observed state of Runbook.
@@ -102,20 +116,35 @@ type RunbookStatus struct {
 	// firingAlerts represent the currently matching active alerts in Alertmanager.
 	// +optional
 	// +listType=atomic
-	// +kubebuilder:validation:MinItems=1
-	FiringAlerts []*RunbookStatusFiringAlert `json:"firingAlerts,omitempty"`
+	// +kubebuilder:validation:MinItems=0
+	FiringAlerts []RunbookStatusFiringAlert `json:"firingAlerts,omitempty"`
+
+	// firingAlertsCount represents the number of currently firing alerts.
+	// +optional
+	FiringAlertsCount *int32 `json:"firingAlertsCount,omitempty"`
 
 	// runningJobs defines a list of pointers to currently running jobs.
 	// +optional
 	// +listType=atomic
-	// +kubebuilder:validation:MinItems=1
-	RunningJobs []*RunbookStatusRunningJob `json:"runningJobs,omitempty"`
+	// +kubebuilder:validation:MinItems=0
+	RunningJobs []RunbookStatusRunningJob `json:"runningJobs,omitempty"`
+
+	// runningJobsCount represents the number of currently running jobs.
+	// +optional
+	RunningJobsCount *int32 `json:"runningJobsCount,omitempty"`
+
+	// failedJobsCount represents the number of currently failed jobs.
+	// +optional
+	FailedJobsCount *int32 `json:"failedJobsCount,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 
 // Runbook is the Schema for the runbooks API
+// +kubebuilder:printcolumn:name="Firing Alerts",type="integer",JSONPath=".status.firingAlertsCount"
+// +kubebuilder:printcolumn:name="Running Jobs",type="integer",JSONPath=".status.runningJobsCount"
+// +kubebuilder:printcolumn:name="Failed Jobs",type="integer",JSONPath=".status.failedJobsCount"
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.conditions[?(@.type=='Available')].reason"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 type Runbook struct {
@@ -151,16 +180,24 @@ func init() {
 // Requires the given slices to be sorted.
 // Fingerprint is calculated over the Labels, there is no need to
 // compare the LabelSet.
-func (rb *Runbook) CompareStatusFiringAlerts(to []*RunbookStatusFiringAlert) bool {
+func (rb *Runbook) CompareStatusFiringAlerts(to []RunbookStatusFiringAlert) bool {
 	if len(rb.Status.FiringAlerts) != len(to) {
 		return false
 	}
 	for i, this := range rb.Status.FiringAlerts {
+		// if this == nil || to[i] == nil {
+		// 	if this != to[i] {
+		// 		return false
+		// 	}
+		// 	continue
+		// }
 		if this.Fingerprint != to[i].Fingerprint {
 			return false
-		} else if this.StartsAt != to[i].StartsAt {
+		}
+		if this.StartsAt != to[i].StartsAt {
 			return false
-		} else if this.UpdatedAt != to[i].UpdatedAt {
+		}
+		if this.UpdatedAt != to[i].UpdatedAt {
 			return false
 		}
 	}
@@ -172,16 +209,24 @@ func (rb *Runbook) CompareStatusFiringAlerts(to []*RunbookStatusFiringAlert) boo
 // Requires the given slices to be sorted.
 // Fingerprint is calculated over the Labels, there is no need to
 // compare the LabelSet.
-func (rb *Runbook) CompareStatusRunningJobs(to []*RunbookStatusRunningJob) bool {
+func (rb *Runbook) CompareStatusRunningJobs(to []RunbookStatusRunningJob) bool {
 	if len(rb.Status.RunningJobs) != len(to) {
 		return false
 	}
 	for i, this := range rb.Status.RunningJobs {
+		// if this == nil || to[i] == nil {
+		// 	if this != to[i] {
+		// 		return false
+		// 	}
+		// 	continue
+		// }
 		if this.Fingerprint != to[i].Fingerprint {
 			return false
-		} else if this.JobReference.Name != to[i].JobReference.Name {
+		}
+		if this.Name != to[i].Name {
 			return false
-		} else if this.JobReference.Namespace != to[i].JobReference.Namespace {
+		}
+		if this.Namespace != to[i].Namespace {
 			return false
 		}
 	}
